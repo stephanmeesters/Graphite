@@ -1,0 +1,96 @@
+id: rs.graphite.Graphite
+runtime: org.gnome.Platform
+runtime-version: '48'             # GNOME runtime includes WebKitGTK for Tauri
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+command: graphite                 # We'll install the built binary to /app/bin/graphite
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri                  # GPU acceleration
+  - --share=network               # optional; remove if you want it offline-only
+  - --filesystem=xdg-documents    # for open/save; narrow or broaden as you like
+  - --filesystem=xdg-download
+
+modules:
+  # 1) Build Graphite (web + Tauri desktop)
+  - name: graphite
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
+      env:
+        CARGO_HOME: /run/build/graphite/cargo
+        RUSTFLAGS: -C debuginfo=0
+        NPM_CONFIG_AUDIT: "false"
+        NPM_CONFIG_FUND: "false"
+    sources:
+      - type: git
+        url: https://github.com/GraphiteEditor/Graphite.git
+        branch: master
+    build-commands:
+      # Ensure toolchains are on PATH (belt + suspenders)
+      - . /usr/lib/sdk/rust-stable/enable.sh
+      - . /usr/lib/sdk/node20/enable.sh
+
+      # Tools Graphite's build expects
+      - cargo install wasm-pack
+      # If build nags about a mismatch, pin the version of wasm-bindgen-cli to match Cargo.toml:
+      # - cargo install -f wasm-bindgen-cli --version <exact-version>
+      - cargo install -f wasm-bindgen-cli || true
+
+      # Build the web+WASM editor
+      - cd frontend && npm ci
+      - cd frontend && npm run build
+
+      # Build the desktop wrapper (Tauri)
+      - cd frontend/src-tauri && cargo build --release
+
+      # Install the produced binary.
+      # NOTE: Adjust the filename below if the crate name differs (e.g. graphite-desktop).
+      - install -Dm755 frontend/src-tauri/target/release/graphite-desktop /app/bin/graphite || \
+        install -Dm755 frontend/src-tauri/target/release/graphite /app/bin/graphite
+
+      # Icon(s): adjust the path/size if the repo layout changes
+      - install -Dm644 frontend/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/rs.graphite.Graphite.png || true
+      - install -Dm644 frontend/src-tauri/icons/256x256.png /app/share/icons/hicolor/256x256/apps/rs.graphite.Graphite.png || true
+
+  # 2) Desktop file + AppStream (simple built-in stubs you can refine later)
+  - name: metadata
+    buildsystem: simple
+    build-commands:
+      - |
+        install -Dm644 /dev/stdin /app/share/applications/rs.graphite.Graphite.desktop << 'EOF'
+        [Desktop Entry]
+        Type=Application
+        Name=Graphite (Alpha)
+        Comment=Open-source vector & raster editor (WASM + Rust)
+        Exec=graphite %U
+        Icon=rs.graphite.Graphite
+        Categories=Graphics;2DGraphics;VectorGraphics;
+        StartupWMClass=Graphite
+        Terminal=false
+        EOF
+      - |
+        install -Dm644 /dev/stdin /app/share/metainfo/rs.graphite.Graphite.metainfo.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <component type="desktop">
+          <id>rs.graphite.Graphite</id>
+          <name>Graphite</name>
+          <summary>Vector & raster editor with a node-based workflow</summary>
+          <metadata_license>CC0-1.0</metadata_license>
+          <project_license>Apache-2.0</project_license>
+          <description>
+            <p>Graphite is a Rust + WebAssembly editor powered by a non-destructive, node-based workflow.</p>
+          </description>
+          <launchable type="desktop-id">rs.graphite.Graphite.desktop</launchable>
+          <provides><binary>graphite</binary></provides>
+          <url type="homepage">https://graphite.rs/</url>
+          <categories><category>Graphics</category></categories>
+          <content_rating type="oars-1.1"/>
+          <developer_name>Graphite Project</developer_name>
+        </component>
+        EOF
+
