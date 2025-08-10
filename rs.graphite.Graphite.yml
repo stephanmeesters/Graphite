@@ -1,3 +1,21 @@
+id: rs.graphite.Graphite
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+command: graphite
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=network
+  - --filesystem=xdg-documents
+  - --filesystem=xdg-download
+
+modules:
   - name: graphite
     buildsystem: simple
     build-options:
@@ -5,6 +23,7 @@
       env:
         CARGO_HOME: /run/build/graphite/cargo
         RUSTFLAGS: -C debuginfo=0
+        # Force cargo to use the git CLI for fetching dependencies
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
         NPM_CONFIG_AUDIT: "false"
@@ -13,8 +32,13 @@
       - type: git
         url: https://github.com/GraphiteEditor/Graphite.git
         branch: master
+
     build-commands:
-      # Apply Cargo network config to prefer git protocol and CLI
+      # Ensure toolchains
+      - . /usr/lib/sdk/rust-stable/enable.sh
+      - . /usr/lib/sdk/node20/enable.sh
+
+      # Write local Cargo config to force git protocol + CLI fetches
       - mkdir -p .cargo
       - |
         cat > .cargo/config.toml <<'EOF'
@@ -25,33 +49,60 @@
         protocol = "git"
         EOF
 
-      # Ensure toolchains
-      - . /usr/lib/sdk/rust-stable/enable.sh
-      - . /usr/lib/sdk/node20/enable.sh
-
       # Tools for the web/WASM build
       - cargo install wasm-pack
+      # Try to match wasm-bindgen-cli to the version used by the project
       - bash -lc 'ver=$(grep -m1 -Po "wasm-bindgen(?:-cli)? = \{[^}]*version *= *\"\\K[^\"]+" Cargo.lock || true); \
                   if [ -n "$ver" ]; then cargo install -f wasm-bindgen-cli --version "$ver"; else cargo install -f wasm-bindgen-cli; fi'
 
-      # Frontend deps
+      # Frontend deps (pnpm via corepack if available; otherwise npm)
       - cd frontend && corepack enable || true
       - cd frontend && if command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile; else npm ci; fi
 
-      # Build frontend
+      # Build frontend (Vite + WASM)
       - cd frontend && if command -v pnpm >/dev/null 2>&1; then pnpm run build; else npm run build; fi
 
-      # Build Tauri desktop
+      # Build Tauri desktop (links against WebKitGTK from GNOME 48)
       - cd frontend/src-tauri && cargo build --release
 
-      # Install binary
+      # Install the produced binary — auto-detect the single ELF in target/release
       - |
         set -euo pipefail
         bin="$(find frontend/src-tauri/target/release -maxdepth 1 -type f -executable ! -name '*.so' ! -name '*.*' | head -n1)"
         test -n "${bin:-}" || { echo "Could not locate built binary in target/release"; exit 1; }
         install -Dm755 "$bin" /app/bin/graphite
 
-      # Icons
+      # Icons (best-effort; adjust if repo paths change)
       - install -Dm644 frontend/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/rs.graphite.Graphite.png || true
       - install -Dm644 frontend/src-tauri/icons/256x256.png /app/share/icons/hicolor/256x256/apps/rs.graphite.Graphite.png || true
+
+  - name: desktop-metadata
+    buildsystem: simple
+    build-commands:
+      - |
+        install -Dm644 /dev/stdin /app/share/applications/rs.graphite.Graphite.desktop << 'EOF'
+        [Desktop Entry]
+        Type=Application
+        Name=Graphite (Alpha)
+        Comment=Open-source vector & raster editor (WASM + Rust)
+        Exec=graphite %U
+        Icon=rs.graphite.Graphite
+        Categories=Graphics;2DGraphics;VectorGraphics;
+        Terminal=false
+        EOF
+      - |
+        install -Dm644 /dev/stdin /app/share/metainfo/rs.graphite.Graphite.metainfo.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <component type="desktop">
+          <id>rs.graphite.Graphite</id>
+          <name>Graphite</name>
+          <summary>Vector & raster editor with a non-destructive, node-based workflow</summary>
+          <metadata_license>CC0-1.0</metadata_license>
+          <project_license>Apache-2.0</project_license>
+          <launchable type="desktop-id">rs.graphite.Graphite.desktop</launchable>
+          <provides><binary>graphite</binary></provides>
+          <categories><category>Graphics</category></categories>
+          <content_rating type="oars-1.1"/>
+        </component>
+        EOF
 
